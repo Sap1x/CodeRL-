@@ -1,0 +1,45 @@
+# ──────────────────────────────────────────────
+# CodeRL++ Training Pipeline Configuration
+# ──────────────────────────────────────────────
+
+model:
+  base: "meta-llama/Llama-3-8B-Instruct"
+  lora_rank: 64
+  lora_alpha: 128
+
+environment:
+  max_steps_per_episode: 20
+  phases: ["surface", "logic", "security", "refinement"]
+  enable_adversarial: true
+  curriculum_strategy: "performance_adaptive"
+
+reward:
+  config_path: "config/reward.yaml"
+
+training:
+  algorithm: "grpo"            # One of: ppo, dpo, grpo
+  episodes: 10000
+  batch_size: 16
+  learning_rate: 2.0e-5
+  rollout_workers: 8
+  checkpoint_interval: 500
+  eval_interval: 100
+
+inference:
+  engine: "vllm"
+  temperature: 0.1
+  max_tokens: 4096
+  top_p: 0.95
+
+logging:
+  level: "INFO"
+  log_every_n_steps: 10
+  save_trajectories: true
+  trajectory_dir: "./trajectories"
+
+# Curriculum configuration
+curriculum:
+  strategy: "performance_adaptive"
+  easy_retirement_threshold: 0.8    # Retire easy tasks when score >= 0.8
+  hard_introduction_threshold: 0.6  # Introduce hard tasks when avg >= 0.6
+  mistake_targeting_weight: 0.3     # Weight for selecting tasks targeting weak spots

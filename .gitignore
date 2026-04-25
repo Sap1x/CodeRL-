@@ -25,3 +25,8 @@ Thumbs.db
 
 # Project
 inference_results.json
+checkpoints/
+trajectories/
+*.pt
+*.safetensors
+wandb/

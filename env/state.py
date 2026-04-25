@@ -32,6 +32,14 @@ class Difficulty(str, Enum):
     HARD = "hard"
 
 
+class Phase(str, Enum):
+    """Multi-phase reasoning stages within an episode."""
+    SURFACE = "surface"
+    LOGIC = "logic"
+    SECURITY = "security"
+    REFINEMENT = "refinement"
+
+
 # ──────────────────────────────────────────────
 # Ground Truth Models
 # ──────────────────────────────────────────────
@@ -73,6 +81,81 @@ class Task(BaseModel):
         description="Variable name → usage locations for trace_variable tool"
     )
 
+# ──────────────────────────────────────────────
+# Agent Memory Models (cross-episode)
+# ──────────────────────────────────────────────
+
+class VulnerabilityRecord(BaseModel):
+    """A vulnerability the agent failed to detect in a past episode."""
+    episode_task_id: str
+    issue_type: str
+    severity: Severity
+    line: int
+    explanation: str
+    episode_number: int
+
+
+class FalsePositiveRecord(BaseModel):
+    """A false positive the agent submitted in a past episode."""
+    episode_task_id: str
+    issue_claimed: str
+    line: int
+    episode_number: int
+
+
+class ReasoningFailure(BaseModel):
+    """A breakdown in the agent's reasoning chain."""
+    episode_task_id: str
+    description: str
+    phase: Phase
+    episode_number: int
+
+
+class ToolStats(BaseModel):
+    """Usage statistics for a single tool."""
+    total_calls: int = 0
+    successful_calls: int = 0
+    calls_leading_to_findings: int = 0
+    redundant_calls: int = 0
+
+
+class EpisodeScore(BaseModel):
+    """Score record for a single episode."""
+    episode_number: int
+    task_id: str
+    score: float
+    precision: float
+    recall: float
+    f1: float
+    issues_found: int
+    false_positives: int
+    tool_calls_made: int
+
+
+class AgentMemory(BaseModel):
+    """Cross-episode memory persisted across the agent's lifetime."""
+    missed_vulnerabilities: list[VulnerabilityRecord] = Field(
+        default_factory=list,
+        description="Vulnerabilities the agent failed to detect"
+    )
+    false_positives: list[FalsePositiveRecord] = Field(
+        default_factory=list,
+        description="False positives the agent submitted"
+    )
+    reasoning_failures: list[ReasoningFailure] = Field(
+        default_factory=list,
+        description="Points where the agent's reasoning broke down"
+    )
+    tool_usage_patterns: dict[str, ToolStats] = Field(
+        default_factory=dict,
+        description="Per-tool usage statistics"
+    )
+    improvement_trajectory: list[EpisodeScore] = Field(
+        default_factory=list,
+        description="Score history across episodes"
+    )
+    total_episodes: int = Field(default=0, description="Total episodes completed")
+
 
 # ──────────────────────────────────────────────
 # Observation (returned to agent)
@@ -94,9 +177,13 @@ class Observation(BaseModel):
     language: str = Field(default="python", description="Programming language")
     step: int = Field(..., description="Current step number (1-indexed)")
     max_steps: int = Field(..., description="Maximum allowed steps")
+    phase: Phase = Field(default=Phase.SURFACE, description="Current reasoning phase")
     history: list[HistoryEntry] = Field(default_factory=list, description="Previous interactions")
     available_tools: list[str] = Field(
-        default_factory=lambda: ["inspect_function", "trace_variable"],
+        default_factory=lambda: [
+            "inspect_function", "trace_variable", "get_call_graph",
+            "check_test_coverage", "inspect_import", "search_codebase",
+        ],
         description="Tools the agent can invoke"
     )
     related_files: Optional[dict[str, str]] = Field(
@@ -105,6 +192,14 @@ class Observation(BaseModel):
     )
     task_id: str = Field(..., description="Current task identifier")
     difficulty: Difficulty = Field(..., description="Task difficulty")
+    agent_memory_summary: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Summary of agent's cross-episode memory (past mistakes, patterns)"
+    )
+    phase_transition: Optional[str] = Field(
+        default=None,
+        description="Phase change notification, e.g. 'logic → security'"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -143,14 +238,55 @@ class Action(BaseModel):
 # Reward
 # ──────────────────────────────────────────────
 
+class TrajectoryReward(BaseModel):
+    """Trajectory-based reward computed over the full action sequence."""
+    reasoning_consistency: float = Field(default=0.0, description="Coherence of findings across steps")
+    efficient_reasoning: float = Field(default=0.0, description="Efficiency of reaching conclusions")
+    redundant_actions: float = Field(default=0.0, description="Penalty for revisiting same areas")
+    noisy_exploration: float = Field(default=0.0, description="Penalty for erratic tool usage")
+    total: float = Field(default=0.0, description="Net trajectory reward")
+
+
+class ImprovementReward(BaseModel):
+    """Improvement reward computed across consecutive episodes."""
+    recall_gain: float = Field(default=0.0, description="Recall improvement over last episode")
+    repeated_mistakes: float = Field(default=0.0, description="Penalty for repeating known errors")
+    new_class_coverage: float = Field(default=0.0, description="Bonus for detecting new vuln types")
+    total: float = Field(default=0.0, description="Net improvement reward")
+
+
+class ToolEfficiencyReward(BaseModel):
+    """Tool usage efficiency reward."""
+    information_gain: float = Field(default=0.0, description="Value from tool calls")
+    redundant_call_penalty: float = Field(default=0.0, description="Penalty for redundant calls")
+    total: float = Field(default=0.0, description="Net tool efficiency reward")
+
+
 class RewardBreakdown(BaseModel):
-    """Detailed breakdown of reward calculation."""
+    """Detailed breakdown of the four-component reward calculation."""
+    # Step-level reward components
     precision_score: float = Field(..., description="Fraction of agent's issues that were correct")
     recall_score: float = Field(..., description="Fraction of ground truth issues found")
     severity_bonus: float = Field(..., description="Bonus for finding critical/high severity issues")
     false_positive_penalty: float = Field(..., description="Penalty for incorrect issues")
     duplicate_penalty: float = Field(..., description="Penalty for duplicate findings")
-    total: float = Field(..., description="Final composite reward")
+    step_reward: float = Field(default=0.0, description="Step-level reward subtotal")
+    # Trajectory reward
+    trajectory_reward: TrajectoryReward = Field(
+        default_factory=TrajectoryReward,
+        description="Trajectory-based reward"
+    )
+    # Improvement reward
+    improvement_reward: ImprovementReward = Field(
+        default_factory=ImprovementReward,
+        description="Cross-episode improvement reward"
+    )
+    # Tool efficiency reward
+    tool_efficiency_reward: ToolEfficiencyReward = Field(
+        default_factory=ToolEfficiencyReward,
+        description="Tool usage efficiency reward"
+    )
+    total: float = Field(..., description="Final composite reward (R_step + R_traj + R_improve + R_tool)")
 
 
 # ──────────────────────────────────────────────
@@ -163,6 +299,7 @@ class State(BaseModel):
     difficulty: Difficulty = Field(..., description="Task difficulty")
     current_step: int = Field(default=0, description="Current step (0 = not started)")
     max_steps: int = Field(default=6, description="Maximum steps allowed")
+    phase: Phase = Field(default=Phase.SURFACE, description="Current reasoning phase")
     issues_detected: list[ReviewComment] = Field(
         default_factory=list,
         description="All issues found so far"
@@ -177,6 +314,10 @@ class State(BaseModel):
     tool_results: dict[str, Any] = Field(
         default_factory=dict,
         description="Cached results from tool calls"
+    )
+    tool_call_log: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Log of all tool calls made during the episode"
     )
 
 

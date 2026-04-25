@@ -1,0 +1,37 @@
+# ──────────────────────────────────────────────
+# CodeRL++ Reward Configuration
+# Four-component reward system weights
+# ──────────────────────────────────────────────
+
+# R_step: Step-level reward
+step_weights:
+  precision: 0.5
+  recall: 0.3
+  severity_bonus: 0.2
+  false_positive_penalty: 0.5
+  duplicate_penalty: 0.2
+
+# Severity bonus for finding critical/high issues
+severity_bonus_map:
+  critical: 0.3
+  high: 0.15
+  medium: 0.05
+  low: 0.0
+
+# R_traj: Trajectory-based reward (end of episode)
+trajectory_weights:
+  reasoning_consistency: 0.15   # Were findings coherent across steps?
+  efficient_reasoning: 0.10     # Did the agent reach conclusions without waste?
+  redundant_actions: 0.10       # Penalty for revisiting same area
+  noisy_exploration: 0.05       # Penalty for erratic tool usage
+
+# R_improve: Cross-episode improvement reward
+improvement:
+  alpha: 0.3    # Weight for recall gain over last episode
+  beta: 0.4     # Weight for repeated mistake penalty
+  gamma: 0.2    # Weight for new vulnerability class bonus
+
+# R_tool: Tool efficiency reward
+tool_efficiency:
+  information_gain: 0.1         # Reward when tool call reveals useful info
+  redundant_call_penalty: 0.15  # Penalty per redundant tool call

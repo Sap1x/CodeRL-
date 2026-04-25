@@ -1,12 +1,18 @@
 """
 CodeRL Tool Simulator — Simulated developer tools for multi-step reasoning.
 
-Provides `inspect_function` and `trace_variable` tools that return
-pre-defined or dynamically generated information about the code being reviewed.
+Provides 6 tools that agents can invoke during code review:
+    - inspect_function: Returns function signature and metadata
+    - trace_variable: Returns variable usage chain
+    - get_call_graph: Returns caller/callee relationships
+    - check_test_coverage: Returns simulated coverage data
+    - inspect_import: Examines module imports and usage
+    - search_codebase: Searches for patterns across code
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from env.state import Task
@@ -23,6 +29,10 @@ class ToolSimulator:
     Supported tools:
         - inspect_function: Returns function signature and docstring
         - trace_variable: Returns variable usage chain
+        - get_call_graph: Returns caller/callee relationships for a function
+        - check_test_coverage: Returns simulated test coverage data
+        - inspect_import: Examines what is imported and how it's used
+        - search_codebase: Searches entire repo for a pattern or symbol
     """
 
     def __init__(self, task: Task):
@@ -36,8 +46,8 @@ class ToolSimulator:
         Execute a simulated tool.
 
         Args:
-            tool_name: One of 'inspect_function', 'trace_variable'
-            argument: The function/variable name to inspect
+            tool_name: One of the supported tool names
+            argument: The function/variable/pattern to inspect
 
         Returns:
             Tool result dict with 'success', 'tool', 'argument', and 'result' keys
@@ -45,6 +55,10 @@ class ToolSimulator:
         handlers = {
             "inspect_function": self._inspect_function,
             "trace_variable": self._trace_variable,
+            "get_call_graph": self._get_call_graph,
+            "check_test_coverage": self._check_test_coverage,
+            "inspect_import": self._inspect_import,
+            "search_codebase": self._search_codebase,
         }
 
         handler = handlers.get(tool_name)
@@ -142,6 +156,221 @@ class ToolSimulator:
             "tool": "trace_variable",
             "argument": variable_name,
             "error": f"Variable '{variable_name}' not found in the current context.",
+        }
+
+    def _get_call_graph(self, function_name: str) -> dict[str, Any]:
+        """
+        Return caller/callee relationships for a function.
+
+        Parses the code diff to find:
+        - Which functions call the target function (callers)
+        - Which functions the target function calls (callees)
+        """
+        lines = self._task.code_diff.split("\n")
+
+        # Find the target function body
+        callers: list[str] = []
+        callees: list[str] = []
+        in_function = False
+        current_func: Optional[str] = None
+
+        for line in lines:
+            stripped = line.lstrip("+").lstrip("-").lstrip()
+
+            # Track which function we're in
+            if stripped.startswith("def "):
+                match = re.match(r"def\s+(\w+)\s*\(", stripped)
+                if match:
+                    current_func = match.group(1)
+                    in_function = current_func == function_name
+
+            # If we're inside the target function, find callees
+            if in_function and current_func == function_name:
+                calls = re.findall(r"(\w+)\s*\(", stripped)
+                for call in calls:
+                    if call != function_name and call not in ("def", "if", "for", "while", "print", "len", "range", "str", "int", "float", "list", "dict", "set", "tuple", "isinstance", "type", "return"):
+                        if call not in callees:
+                            callees.append(call)
+
+            # If we're in any other function, check if it calls our target
+            if current_func and current_func != function_name:
+                if f"{function_name}(" in stripped:
+                    if current_func not in callers:
+                        callers.append(current_func)
+
+        # Also check related files
+        if self._task.related_files:
+            for fname, content in self._task.related_files.items():
+                if f"{function_name}(" in content:
+                    callers.append(f"(from {fname})")
+
+        if callers or callees:
+            return {
+                "success": True,
+                "tool": "get_call_graph",
+                "argument": function_name,
+                "result": {
+                    "function": function_name,
+                    "callers": callers,
+                    "callees": callees,
+                    "file": self._task.file_name,
+                },
+            }
+
+        return {
+            "success": False,
+            "tool": "get_call_graph",
+            "argument": function_name,
+            "error": f"Function '{function_name}' not found in call graph.",
+        }
+
+    def _check_test_coverage(self, file_name: str) -> dict[str, Any]:
+        """
+        Return simulated test coverage data for a file.
+
+        Generates coverage based on the code diff — lines with known
+        ground truth issues are marked as uncovered (simulating the
+        gap that tests don't catch the bugs).
+        """
+        lines = self._task.code_diff.split("\n")
+        total_lines = len(lines)
+
+        # Ground truth issue lines are "uncovered"
+        uncovered_lines = [gt.line for gt in self._task.ground_truth]
+
+        # Added lines (+) that aren't in ground truth are "covered"
+        covered_lines = []
+        for i, line in enumerate(lines, 1):
+            if line.startswith("+") and not line.startswith("+++"):
+                if i not in uncovered_lines:
+                    covered_lines.append(i)
+
+        coverage_pct = (
+            len(covered_lines) / (len(covered_lines) + len(uncovered_lines)) * 100
+            if (covered_lines or uncovered_lines)
+            else 0.0
+        )
+
+        return {
+            "success": True,
+            "tool": "check_test_coverage",
+            "argument": file_name,
+            "result": {
+                "file": file_name,
+                "coverage_percentage": round(coverage_pct, 1),
+                "total_lines": total_lines,
+                "covered_lines": len(covered_lines),
+                "uncovered_lines": uncovered_lines[:15],  # Cap output
+                "note": "Lines with low coverage may contain untested edge cases or bugs.",
+            },
+        }
+
+    def _inspect_import(self, module_name: str) -> dict[str, Any]:
+        """
+        Examine what is imported from a module and how it's used.
+
+        Parses import statements and usage patterns from the code diff.
+        """
+        lines = self._task.code_diff.split("\n")
+        imports_found: list[str] = []
+        usage_locations: list[str] = []
+
+        for i, line in enumerate(lines, 1):
+            stripped = line.lstrip("+").lstrip("-").lstrip()
+
+            # Check import statements
+            if f"import {module_name}" in stripped or f"from {module_name}" in stripped:
+                prefix = "added" if line.startswith("+") else "removed" if line.startswith("-") else "context"
+                imports_found.append(f"line ~{i} ({prefix}): {stripped.strip()}")
+
+            # Check usage (not import lines)
+            elif module_name in stripped and "import" not in stripped:
+                prefix = "added" if line.startswith("+") else "removed" if line.startswith("-") else "context"
+                usage_locations.append(f"line ~{i} ({prefix}): {stripped.strip()}")
+
+        # Also check related files
+        related_usage: dict[str, list[str]] = {}
+        if self._task.related_files:
+            for fname, content in self._task.related_files.items():
+                if module_name in content:
+                    rlines = [
+                        l.strip() for l in content.split("\n")
+                        if module_name in l
+                    ]
+                    if rlines:
+                        related_usage[fname] = rlines[:5]
+
+        if imports_found or usage_locations:
+            return {
+                "success": True,
+                "tool": "inspect_import",
+                "argument": module_name,
+                "result": {
+                    "module": module_name,
+                    "imports": imports_found,
+                    "usage_in_diff": usage_locations[:10],
+                    "usage_in_related_files": related_usage,
+                    "file": self._task.file_name,
+                },
+            }
+
+        return {
+            "success": False,
+            "tool": "inspect_import",
+            "argument": module_name,
+            "error": f"Module '{module_name}' not found in the current context.",
+        }
+
+    def _search_codebase(self, pattern: str) -> dict[str, Any]:
+        """
+        Search entire repo for a pattern or symbol.
+
+        Searches through code_diff and related_files.
+        """
+        results: list[dict[str, Any]] = []
+
+        # Search in main diff
+        lines = self._task.code_diff.split("\n")
+        for i, line in enumerate(lines, 1):
+            content = line.lstrip("+").lstrip("-").lstrip()
+            if pattern.lower() in content.lower():
+                prefix = "added" if line.startswith("+") else "removed" if line.startswith("-") else "context"
+                results.append({
+                    "file": self._task.file_name,
+                    "line": i,
+                    "type": prefix,
+                    "content": content.strip(),
+                })
+
+        # Search in related files
+        if self._task.related_files:
+            for fname, content in self._task.related_files.items():
+                for i, line in enumerate(content.split("\n"), 1):
+                    if pattern.lower() in line.lower():
+                        results.append({
+                            "file": fname,
+                            "line": i,
+                            "type": "related",
+                            "content": line.strip(),
+                        })
+
+        if results:
+            return {
+                "success": True,
+                "tool": "search_codebase",
+                "argument": pattern,
+                "result": {
+                    "pattern": pattern,
+                    "matches": results[:20],  # Cap at 20 results
+                    "total_matches": len(results),
+                },
+            }
+
+        return {
+            "success": False,
+            "tool": "search_codebase",
+            "argument": pattern,
+            "error": f"Pattern '{pattern}' not found in the codebase.",
         }
 
     # ── helpers ─────────────────────────────────

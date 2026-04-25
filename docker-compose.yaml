@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────
+# CodeRL++ — Self-Improving Agentic Code Review RL Environment
+# Docker Compose with Redis for cross-episode memory persistence
+# ─────────────────────────────────────────────────────
+
+services:
+  coderl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coderl-server
+    ports:
+      - "7860:7860"
+    environment:
+      - CODERL_DATA_DIR=/app/data
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: coderl-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+    driver: local

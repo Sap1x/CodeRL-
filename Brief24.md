@@ -73,8 +73,6 @@ Step 3: Refined confidence scores, removed one marginal duplicate
 Final: recall=0.82 | precision=0.89
 ```
 
-![Before vs After](assets/before_after.png)
-
 ---
 
 ## ⚡ Quick Start

@@ -1,5 +1,5 @@
 """
-CodeRL API Server — FastAPI server exposing the CodeReviewEnv as HTTP endpoints.
+CodeRL++ API Server — FastAPI server exposing the CodeReviewEnv as HTTP endpoints.
 
 Endpoints:
     POST /reset          — Reset environment (optionally with task_id)
@@ -7,6 +7,8 @@ Endpoints:
     GET  /state          — Get current state
     GET  /health         — Health check
     GET  /tasks          — List available tasks
+    GET  /memory         — Get agent memory state
+    GET  /metrics        — Get training metrics
     GET  /               — Environment info
 """
 
@@ -47,9 +49,9 @@ async def lifespan(app: FastAPI):
     global env
     data_dir = os.environ.get("CODERL_DATA_DIR", None)
     env = CodeReviewEnv(data_dir=data_dir)
-    logger.info("🚀 CodeRL environment loaded and ready")
+    logger.info("🚀 CodeRL++ environment loaded and ready")
     yield
-    logger.info("👋 CodeRL server shutting down")
+    logger.info("👋 CodeRL++ server shutting down")
 
 
 # ──────────────────────────────────────────────
@@ -57,10 +59,11 @@ async def lifespan(app: FastAPI):
 # ──────────────────────────────────────────────
 
 app = FastAPI(
-    title="CodeRL — Agentic Code Review RL Environment",
+    title="CodeRL++ — Self-Improving Agentic Code Review RL Environment",
     description=(
         "A production-grade OpenEnv-compliant Reinforcement Learning environment "
-        "that simulates real-world code review workflows."
+        "that simulates real-world code review workflows with multi-phase reasoning, "
+        "cross-episode agent memory, and adaptive curriculum."
     ),
     version="1.0.0",
     lifespan=lifespan,
@@ -102,7 +105,7 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy", "environment": "CodeRL", "version": "1.0.0"}
+    return {"status": "healthy", "environment": "CodeRL++", "version": "1.0.0"}
 
 
 @app.post("/reset")
@@ -163,3 +166,25 @@ async def tasks():
     """List all available task IDs."""
     assert env is not None
     return {"tasks": env.get_task_ids()}
+
+
+@app.get("/memory")
+async def memory():
+    """Retrieve current agent memory state."""
+    assert env is not None
+    return {
+        "success": True,
+        "memory": env.get_memory(),
+        "summary": env.get_memory_summary(),
+    }
+
+
+@app.get("/metrics")
+async def metrics():
+    """Retrieve current training metrics and reward stats."""
+    assert env is not None
+    return {
+        "success": True,
+        "metrics": env.get_metrics(),
+        "curriculum": env.get_curriculum_state(),
+    }

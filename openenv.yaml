@@ -1,13 +1,14 @@
-# OpenEnv Specification for CodeRL
-# Agentic Code Review RL Environment
+# OpenEnv Specification for CodeRL++
+# Self-Improving Agentic Code Review RL Environment
 
-name: CodeRL
+name: CodeRL++
 version: "1.0.0"
 description: >
   A production-grade OpenEnv-compliant Reinforcement Learning environment
   that simulates real-world code review workflows. AI agents analyze
   pull request diffs, detect bugs and security vulnerabilities, and
-  provide structured review feedback.
+  provide structured review feedback. Features multi-phase reasoning,
+  cross-episode agent memory, and adaptive curriculum.
 
 # ──────────────────────────────────────────────
 # Environment Configuration
@@ -20,6 +21,9 @@ environment:
     easy: 5
     medium: 6
     hard: 8
+  phases: ["surface", "logic", "security", "refinement"]
+  self_improving: true
+  curriculum_strategy: "performance_adaptive"
 
 # ──────────────────────────────────────────────
 # Observation Schema
@@ -46,6 +50,10 @@ observation:
     max_steps:
       type: integer
       description: "Maximum steps allowed"
+    phase:
+      type: string
+      enum: ["surface", "logic", "security", "refinement"]
+      description: "Current reasoning phase"
     history:
       type: array
       description: "Previous interaction history"
@@ -66,6 +74,14 @@ observation:
     difficulty:
       type: string
       enum: ["easy", "medium", "hard"]
+    agent_memory_summary:
+      type: object
+      nullable: true
+      description: "Summary of agent's cross-episode memory (past mistakes, patterns)"
+    phase_transition:
+      type: string
+      nullable: true
+      description: "Phase change notification, e.g. 'logic → security'"
 
 # ──────────────────────────────────────────────
 # Action Schema
@@ -107,17 +123,18 @@ action:
         properties:
           tool:
             type: string
-            enum: ["inspect_function", "trace_variable"]
+            enum: ["inspect_function", "trace_variable", "get_call_graph", "check_test_coverage", "inspect_import", "search_codebase"]
           argument:
             type: string
 
 # ──────────────────────────────────────────────
-# Reward Schema
+# Reward Schema (Four-component)
 # ──────────────────────────────────────────────
 
 reward:
   type: object
   properties:
+    # Step-level reward
     precision_score:
       type: number
       description: "Weighted precision component"
@@ -133,12 +150,39 @@ reward:
     duplicate_penalty:
       type: number
       description: "Penalty for duplicate findings"
+    step_reward:
+      type: number
+      description: "Step-level reward subtotal"
+    # Trajectory reward
+    trajectory_reward:
+      type: object
+      properties:
+        reasoning_consistency: { type: number }
+        efficient_reasoning: { type: number }
+        redundant_actions: { type: number }
+        noisy_exploration: { type: number }
+        total: { type: number }
+    # Improvement reward (cross-episode)
+    improvement_reward:
+      type: object
+      properties:
+        recall_gain: { type: number }
+        repeated_mistakes: { type: number }
+        new_class_coverage: { type: number }
+        total: { type: number }
+    # Tool efficiency reward
+    tool_efficiency_reward:
+      type: object
+      properties:
+        information_gain: { type: number }
+        redundant_call_penalty: { type: number }
+        total: { type: number }
     total:
       type: number
-      description: "Composite reward score"
+      description: "Composite reward: R_step + R_traj + R_improve + R_tool"
   formula: >
-    total = precision * 0.5 + recall * 0.3 + severity_bonus * 0.2
-            - false_positive_penalty - duplicate_penalty
+    total = step_reward + trajectory_reward.total
+            + improvement_reward.total + tool_efficiency_reward.total
 
 # ──────────────────────────────────────────────
 # Tasks
@@ -191,12 +235,26 @@ entrypoint:
 endpoints:
   reset:
     path: /reset
-    method: GET
+    method: POST
   step:
     path: /step
     method: POST
   state:
     path: /state
+    method: GET
+  memory:
+    path: /memory
+    method: GET
+    description: "Retrieve current agent memory state"
+  metrics:
+    path: /metrics
+    method: GET
+    description: "Retrieve training metrics and reward stats"
+  health:
+    path: /health
+    method: GET
+  tasks:
+    path: /tasks
     method: GET
 
 # ──────────────────────────────────────────────
