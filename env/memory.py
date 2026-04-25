@@ -188,23 +188,31 @@ class AgentMemoryManager:
         recall_gain = current_recall - prev_recall
 
         # ── Repeated mistakes ──
-        # Count how many of the current missed issues were also missed before
-        repeated = 0
-        missed_types = {m.issue for m in current_grade.missed_issues}
-        historical_misses = {v.issue_type for v in self._memory.missed_vulnerabilities}
-        repeated = len(missed_types & historical_misses)
-        repeated_penalty = repeated * 0.1  # 0.1 per repeat
+        # Count how many of the current missed issues were also missed in RECENT episodes
+        # (Using a sliding window of recent history feels more like 'learning' than total history)
+        current_missed_types = {m.issue for m in current_grade.missed_issues}
+        recent_misses = {v.issue_type for v in self._memory.missed_vulnerabilities[-20:]}
+        repeated = len(current_missed_types & recent_misses)
+        repeated_penalty = repeated * 0.15  # Slightly higher penalty for research rigor
 
         # ── New class coverage ──
-        # Bonus for finding vulnerability types never found before
+        # Bonus for finding vulnerability types NEVER found before in training history
         found_types = {m.ground_truth.issue for m in current_grade.matches if m.is_match}
-        historically_found = set()
+        
+        # Determine historically found types from successful matches in trajectory
+        historically_found: set[str] = set()
         for ep in trajectory:
-            # We can't perfectly reconstruct, so use missed type complement
+            # We don't store found classes per episode in EpisodeScore yet, 
+            # so we infer from missed classes in that episode's context if possible
+            # or use the memory manager's internal tracking if we add it.
+            # For now, we'll check against missed history complement as an approximation.
             pass
-        # Simpler: bonus for each found type that appears in missed history
-        recovered = found_types & historical_misses
-        new_class_bonus = len(recovered) * 0.15  # 0.15 per recovered class
+        
+        # Implementation: Check if any found type is in the 'historically missed' set 
+        # and NOT in a 'historically found' set (if we had one).
+        # Better: let's track 'recovered' classes – found now, but missed in any of the last 10 eps.
+        recovered = found_types & recent_misses
+        new_class_bonus = len(recovered) * 0.20 
 
         # ── Total ──
         total = (
@@ -223,29 +231,22 @@ class AgentMemoryManager:
     def get_memory_summary(self) -> dict[str, Any]:
         """
         Return a compact summary of agent memory for inclusion in observations.
-
-        This gives the agent awareness of its historical weaknesses without
-        exposing raw memory internals.
         """
         mem = self._memory
 
-        # Aggregate missed vulnerability types
         missed_by_type: dict[str, int] = {}
-        for v in mem.missed_vulnerabilities[-50:]:  # Last 50
+        for v in mem.missed_vulnerabilities[-50:]:
             missed_by_type[v.issue_type] = missed_by_type.get(v.issue_type, 0) + 1
 
-        # Aggregate false positive patterns
         fp_by_type: dict[str, int] = {}
         for fp in mem.false_positives[-50:]:
             fp_by_type[fp.issue_claimed] = fp_by_type.get(fp.issue_claimed, 0) + 1
 
-        # Recent scores
         recent_scores = [
             {"task": e.task_id, "score": e.score, "recall": e.recall}
             for e in mem.improvement_trajectory[-5:]
         ]
 
-        # Tool efficiency
         tool_summary = {}
         for tool_name, stats in mem.tool_usage_patterns.items():
             efficiency = (
@@ -269,15 +270,18 @@ class AgentMemoryManager:
             "recent_scores": recent_scores,
             "tool_efficiency": tool_summary,
             "reasoning_failure_count": len(mem.reasoning_failures),
+            "suggested_focus": list(missed_by_type.keys())[:2] if missed_by_type else ["exploration"]
         }
 
     def get_metrics(self) -> dict[str, Any]:
         """Return aggregated training metrics for the /metrics endpoint."""
+        import statistics
         trajectory = self._memory.improvement_trajectory
         if not trajectory:
             return {
                 "total_episodes": 0,
                 "average_score": 0.0,
+                "score_std_dev": 0.0,
                 "average_recall": 0.0,
                 "average_precision": 0.0,
                 "improvement_trend": 0.0,
@@ -290,10 +294,9 @@ class AgentMemoryManager:
         recalls = [e.recall for e in trajectory]
         precisions = [e.precision for e in trajectory]
 
-        # Compute improvement trend (slope of last 10 scores)
+        # Improvement trend
         recent = scores[-10:]
         if len(recent) >= 2:
-            # Simple linear regression slope
             n = len(recent)
             x_mean = (n - 1) / 2
             y_mean = sum(recent) / n
@@ -306,6 +309,7 @@ class AgentMemoryManager:
         return {
             "total_episodes": len(trajectory),
             "average_score": round(sum(scores) / len(scores), 4),
+            "score_std_dev": round(statistics.stdev(scores) if len(scores) > 1 else 0.0, 4),
             "average_recall": round(sum(recalls) / len(recalls), 4),
             "average_precision": round(sum(precisions) / len(precisions), 4),
             "improvement_trend": round(trend, 6),
@@ -319,7 +323,9 @@ class AgentMemoryManager:
                 {"episode": e.episode_number, "score": e.score, "task": e.task_id}
                 for e in trajectory[-20:]
             ],
+            "convergence_signal": trend > 0 and len(scores) > 50
         }
+
 
     def reset(self) -> None:
         """Reset all memory (for testing or fresh starts)."""
